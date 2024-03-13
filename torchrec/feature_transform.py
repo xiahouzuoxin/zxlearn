@@ -110,7 +110,7 @@ def feature_transform(df, feat_configs, is_train=False):
 
         return s, feat_config
     
-    def process_list(feat_configs, s, is_train):
+    def process_list(feat_configs, s, is_train, padding_value=-100):
         dtype = feat_configs['dtype']
         flat_s = s.explode()
         if dtype == 'category':
@@ -120,6 +120,12 @@ def feature_transform(df, feat_configs, is_train=False):
         else:
             raise ValueError(f'Unsupported data type: {dtype}')
         s = flat_s.groupby(level=0).agg(list)
+        # padding
+        max_len = s.map(len).max()
+        padding_maxlen = feat_configs.get('maxlen', None)
+        if padding_maxlen:
+            max_len = min([padding_maxlen, max_len])
+        s = s.map( lambda x: [padding_value] * (max_len - len(x)) + x if len(x) < max_len else x[-max_len:])
         return s, updated_f
 
     # transform features
@@ -156,15 +162,31 @@ class DataFrameDataset(Dataset):
             df_transform=lambda df: feature_transform(df,feat_configs,is_train=False)
         )
     '''
-    def __init__(self, df, sparse_cols, seq_sparse_cols, dense_cols, seq_dense_cols=None, target_cols=None, padding_value=-100, df_transform=None):
+    def __init__(self, df, 
+                 sparse_cols=None, seq_sparse_cols=None, dense_cols=None, seq_dense_cols=None, 
+                 weight_cols_mapping=None, 
+                 feat_configs=[], 
+                 target_cols=None, 
+                 padding_value=-100, 
+                 df_transform=None):
         if df_transform:
             df = df_transform(df)
 
-        self.dense_cols = dense_cols
-        self.seq_dense_cols = seq_dense_cols
-        self.sparse_cols = sparse_cols
-        self.seq_sparse_cols = seq_sparse_cols
+        self.dense_cols = dense_cols if dense_cols is not None else \
+            [f['name'] for f in feat_configs if f['type'] == 'dense' and not f.get('islist')]
+        self.seq_dense_cols = seq_dense_cols if seq_dense_cols is not None else \
+            [f['name'] for f in feat_configs if f['type'] == 'dense' and f.get('islist')]
+        self.sparse_cols = sparse_cols if sparse_cols is not None else \
+            [f['name'] for f in feat_configs if f['type'] == 'sparse' and not f.get('islist')]
+        self.seq_sparse_cols = seq_sparse_cols if seq_sparse_cols is not None else \
+            [f['name'] for f in feat_configs if f['type'] == 'sparse' and f.get('islist')]
         self.target_cols = target_cols
+
+        # weight for sparse features
+        self.weight_cols_mapping = weight_cols_mapping if weight_cols_mapping is not None else {
+            f['name']: f.get('weight_col') \
+                for f in feat_configs if f['type'] == 'sparse' if f.get('weight')
+        }
 
         self.total_samples = len(df)
         self.padding_value = padding_value
@@ -180,10 +202,11 @@ class DataFrameDataset(Dataset):
             features.update( {'dense_features': self.dense_data[idx, :]} )
         if hasattr(self, 'seq_dense_features'):
             features.update( {'seq_dense_features': self.seq_dense_data[idx, :]} )
-        if hasattr(self, 'sparse_data'):
             features.update({f'{k}': v[idx,:] for k,v in self.sparse_data.items()})
-        if hasattr(self, 'seq_sparse_data'):
-            features.update({f'{k}': v[idx,:] for k,v in self.seq_sparse_data.items()})
+            features.update({f'{k}': v[idx,:] for k,v in self.sparse_data.items()})
+        features.update({f'{k}': v[idx,:] for k,v in self.sparse_data.items()})
+        features.update({f'{k}': v[idx,:] for k,v in self.seq_sparse_data.items()})
+        features.update({f'{k}': v[idx,:] for k,v in self.weight_data.items()})
 
         return features, self.target[idx,:] if hasattr(self, 'target') else None
 
@@ -198,22 +221,27 @@ class DataFrameDataset(Dataset):
             )
             self.seq_dense_data = self.seq_dense_data.view(len(df), -1) # num x dim_feature
 
-        if self.sparse_cols is not None and len(self.sparse_cols) > 0:
-            self.sparse_data = {}
-            for col in self.sparse_cols:
-                self.sparse_data[col] = torch.tensor(df[[col]].values, dtype=torch.int)
+        self.weight_data = {}
+        self.sparse_data = {}
+        for col in self.sparse_cols:
+            self.sparse_data[col] = torch.tensor(df[[col]].values, dtype=torch.int)
+            if col in self.weight_cols_mapping:
+                weight_col = self.weight_cols_mapping[col]
+                self.weight_data[f'{col}_wgt'] = torch.tensor(df[[weight_col]].values, dtype=torch.float)
         
-        if self.seq_sparse_cols is not None and len(self.seq_sparse_cols) > 0:
-            # for sparse sequences, padding to the maximum length
-            self.seq_sparse_data = {}
-            df_seq_sparse = df[self.seq_sparse_cols].copy()
-            for col in self.seq_sparse_cols:
-                max_len = df_seq_sparse[col].apply(len).max()
-                df_seq_sparse[col] = df_seq_sparse[col].apply( lambda x: [self.padding_value] * (max_len - len(x)) + x)
-                self.seq_sparse_data[col] = torch.tensor(df_seq_sparse[col].values.tolist(), dtype=torch.int)
-        
-        # print(df_seq_sparse.head())
-        # self.seq_sparse_data = torch.tensor(df_seq_sparse.values.tolist(), dtype=torch.int)
+        # for sparse sequences, padding to the maximum length
+        self.seq_sparse_data = {}
+        for col in self.seq_sparse_cols:
+            max_len = df[col].apply(len).max()
+            self.seq_sparse_data[col] = df[col].apply( 
+                lambda x: [self.padding_value] * (max_len - len(x)) + x if len(x) < max_len else x[-max_len:])
+            self.seq_sparse_data[col] = torch.tensor(self.seq_sparse_data[col].values.tolist(), dtype=torch.int)
+            if col in self.weight_cols_mapping:
+                weight_col = self.weight_cols_mapping[col]
+                self.weight_data[f'{col}_wgt'] = df[weight_col].apply( 
+                    lambda x: [0.] * (max_len - len(x)) + x if len(x) < max_len else x[-max_len:])
+                self.weight_data[f'{col}_wgt'] = torch.tensor(
+                    self.weight_data[f'{col}_wgt'].values.tolist(), dtype=torch.int)
 
         if self.target_cols is not None:
             self.target = torch.tensor(df[self.target_cols].values.tolist(), dtype=torch.float32)
@@ -223,10 +251,11 @@ class DataFrameDataset(Dataset):
             self.dense_data = self.dense_data.to(device)
         if hasattr(self, 'seq_dense_data'):
             self.seq_dense_data = self.seq_dense_data.to(device)
-        if hasattr(self, 'sparse_data'):
-            self.sparse_data = {k: v.to(device) for k,v in self.sparse_data.items()}
-        if hasattr(self, 'seq_sparse_data'):
-            self.seq_sparse_data = {k: v.to(device) for k,v in self.seq_sparse_data.items()}
+
+        self.sparse_data = {k: v.to(device) for k,v in self.sparse_data.items()}
+        self.seq_sparse_data = {k: v.to(device) for k,v in self.seq_sparse_data.items()}
+        self.weight_data = {k: v.to(device) for k,v in self.weight_data.items()}
+
         if hasattr(self, 'target'):
             self.target = self.target.to(device)
 
