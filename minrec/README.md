@@ -11,12 +11,17 @@ Supported:
 - Varlen sequence features by padding to the max length when training
 - Hash for categorical features
 
+TODOs:
+
+- [ ] support seq features with weights, for example: 'k1:v1,k2:v2,k3:v3'
+
 # Models
 
 - [X] DNN
 - [ ] DIN
 
-# Test Dataset
+# Related Dataset
 
 - random generated
+- https://cseweb.ucsd.edu/~jmcauley/datasets/amazon/links.html
 - https://tianchi.aliyun.com/dataset/56?spm=a2c22.12282016.0.0.27934197fn5Vdv
