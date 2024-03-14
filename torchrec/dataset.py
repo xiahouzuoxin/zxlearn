@@ -6,6 +6,7 @@ import pandas as pd
 import torch
 from torch.utils.data import Dataset, DataLoader
 from torch.nn.utils.rnn import pad_sequence
+from joblib import Parallel, delayed
 
 pd.options.mode.chained_assignment = None  # default='warn'
 pd.options.display.max_rows = 999
@@ -17,7 +18,7 @@ def hash(v, hash_buckets):
     hash_integer = int(hash_digest, 16)
     return hash_integer % hash_buckets
 
-def feature_transform(df, feat_configs, is_train=False):
+def feature_transform(df, feat_configs, is_train=False, n_jobs=1):
     '''
     Feature transform. The format of `feat_configs`:
     [
@@ -129,23 +130,39 @@ def feature_transform(df, feat_configs, is_train=False):
         return s, updated_f
 
     # transform features
-    for k, f in enumerate( feat_configs ):
+    def _transform_one(s, f, is_train):
         fname = f['name']
         dtype = f['dtype']
         islist = f.get('islist', None)
         
         print(f'Processing feature {fname}...')
         if islist:
-            df[fname], updated_f = process_list(f, df[fname], is_train)
+            updated_s, updated_f = process_list(f, s, is_train)
         elif dtype == 'category':
-            df[fname], updated_f = process_category(f, df[fname], is_train)
+            updated_s, updated_f = process_category(f, s, is_train)
         elif dtype == 'numerical':
-            df[fname], updated_f = process_numerical(f, df[fname], is_train)
+            updated_s, updated_f = process_numerical(f, s, is_train)
         else:
             raise ValueError(f'Unsupported data type: {dtype}')
+            
+        return updated_s, updated_f
+    
+    if n_jobs <= 1:
+        for k, f in enumerate( feat_configs ):
+            df[f['name']], updated_f = _transform_one(df[f['name']], f, is_train)
+            if is_train:
+                feat_configs[k] = updated_f
+        return df
+    
+    # parallel process features
+    results = Parallel(n_jobs = n_jobs)(
+        delayed(_transform_one)(df[f_config['name']], f_config, is_train) for f_config in feat_configs
+    )
 
+    # update df & feat_configs
+    for k, (updated_s, updated_f) in zip(range(len(feat_configs)), results):
+        df[updated_f['name']] = updated_s
         if is_train:
-            # update feat config
             feat_configs[k] = updated_f
 
     return df
