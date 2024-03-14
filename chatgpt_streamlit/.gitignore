@@ -1,0 +1,4 @@
+__pycache__/
+.streamlit/secrets.toml
+knowledge/docs/*
+knowledge/vector_db/*

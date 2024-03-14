@@ -1,0 +1,10 @@
+openai
+tiktoken
+tqdm
+streamlit
+chromadb
+sentence-transformers
+tenacity
+docx2txt
+PyPDF2
+python-pptx
