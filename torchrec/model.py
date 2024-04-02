@@ -35,9 +35,10 @@ class DNN(nn.Module):
                 layers.append(nn.Linear(num_sparse + num_dense, hidden_unit))
             else:
                 layers.append(nn.Linear(hidden_units[k-1], hidden_unit))
+            # layers.append(nn.BatchNorm1d(hidden_unit))
             # layers.append(nn.PReLU())
             layers.append(nn.ReLU())
-            # layers.append(nn.BatchNorm1d(hidden_unit))
+            layers.append(nn.Dropout(p=0.2))
         self.fc_layers = nn.Sequential(*layers)
         self.logits = nn.Linear(hidden_units[-1], 1)
         # self.out = nn.Sigmoid()
@@ -50,6 +51,17 @@ class DNN(nn.Module):
         else:
             return None
 
+    def target_attention(self, target_emb, candidate_embs):
+        # target_emb: [B, E]
+        # candidate_embs: [B, N, E]
+        # return: [B, E]
+        # candidate_embs = torch.stack(candidate_embs, dim=1)  # [B, N, E]
+        attn_scores = torch.matmul(candidate_embs, target_emb.unsqueeze(-1)).squeeze(-1)  # [B, N, 1] * [B, 1, E] -> [B, N]
+        attn_scores = F.softmax(attn_scores, dim=1)
+        weighted_embs = attn_scores.unsqueeze(-1) * candidate_embs  # [B, N, 1] * [B, N, E] -> [B, N, E]
+        weighted_emb = weighted_embs.sum(dim=1)  # [B, E]
+        return weighted_emb
+
     def forward(self, input_feats):
         sparse_inputs = []
         dense_inputs = []
@@ -57,18 +69,10 @@ class DNN(nn.Module):
         # for k, f_config in enumerate(self.feat_configs):
         for f_name, f_emb in self.embeddings.items():
             _input_feat = input_feats[f_name]
-            # Lookup embeddings for each elements in th list
-            embedded_list = []
-            max_list_length = _input_feat.shape[1]  # Assuming input_feats[k] is a 2D tensor (batch_size, max_list_length)
             mask = (_input_feat >= 0).float()  
-            _input_feat = _input_feat * mask.long()  # Set padding to 0 for embedding lookup, will be zeroed out after embedding lookup
-            for idx in range(max_list_length):
-                masked_emb = f_emb(_input_feat[:, idx]) * mask[:, idx].unsqueeze(-1)
-                embedded_list.append(masked_emb)
-            # sum pooling the embeddings of the list
-            # embedded_tensor = sum(embedded_list)
-            embedded_tensor = torch.stack(embedded_list, dim=1)
-            embedded_tensor = embedded_tensor.sum(dim=1)
+            _input_feat = _input_feat * mask.long()  # Set padding to 0 for embedding lookup, will be masked out later
+            masked_emb = f_emb(_input_feat) * mask.unsqueeze(-1)
+            embedded_tensor = masked_emb.sum(dim=1)
             sparse_inputs.append(embedded_tensor)
 
         # print(sparse_inputs[0].shape, sparse_inputs[1].shape, sparse_inputs[2].shape)
