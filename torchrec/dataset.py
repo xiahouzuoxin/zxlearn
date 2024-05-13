@@ -12,13 +12,10 @@ pd.options.mode.chained_assignment = None  # default='warn'
 pd.options.display.max_rows = 999
 pd.options.display.max_columns = 100
 
-def hash(v, hash_buckets):
-    hash_object = hashlib.sha256(str(v).encode())
-    hash_digest = hash_object.hexdigest()
-    hash_integer = int(hash_digest, 16)
-    return hash_integer % hash_buckets
-
-def feature_transform(df, feat_configs, is_train=False, n_jobs=1):
+def feature_transform(df, feat_configs, is_train=False, 
+                      outliers_category=['','None','none','nan','NaN','NAN','NaT','unknown','Unknown','Other','other','others','Others','REJ','Reject','REJECT','Rejected'], 
+                      outliers_numerical=[], 
+                      n_jobs=1):
     '''
     Feature transform. The format of `feat_configs`:
     [
@@ -33,11 +30,18 @@ def feature_transform(df, feat_configs, is_train=False, n_jobs=1):
     else:
         print(f'==> Feature transforming (is_train={is_train}) ...')
 
+    def hash(v, hash_buckets):
+        import hashlib
+        hash_object = hashlib.sha256(str(v).encode())
+        hash_digest = hash_object.hexdigest()
+        hash_integer = int(hash_digest, 16)
+        return hash_integer % hash_buckets
+    
     def process_category(feat_config, s, is_train):
         name = feat_config['name']
         oov = feat_config.get('oov', 'other') # out of vocabulary
         s = s.replace(
-            ['','None','none','nan','NaN','NAN','NaT','unknown','Unknown','Other','other','others','Others','REJ','Reject','REJECT','Rejected'], 
+            outliers_category, 
             np.nan).fillna(oov).map( lambda x: str(int(x) if type(x) is float else x) )
         s = s.astype(str).str.lower()
         
@@ -113,6 +117,9 @@ def feature_transform(df, feat_configs, is_train=False, n_jobs=1):
     
     def process_list(feat_configs, s, is_train, padding_value=-100):
         dtype = feat_configs['dtype']
+        maxlen = feat_configs.get('maxlen', None)
+        if maxlen:
+            s = s.map(lambda x: x[-maxlen:] if isinstance(x, list) else x)
         flat_s = s.explode()
         if dtype == 'category':
             flat_s, updated_f = process_category(feat_configs, flat_s, is_train)
@@ -129,11 +136,15 @@ def feature_transform(df, feat_configs, is_train=False, n_jobs=1):
         s = s.map( lambda x: [padding_value] * (max_len - len(x)) + x if len(x) < max_len else x[-max_len:])
         return s, updated_f
 
-    # transform features
     def _transform_one(s, f, is_train):
         fname = f['name']
         dtype = f['dtype']
         islist = f.get('islist', None)
+        pre_transform = f.get('pre_transform', None)
+
+        # pre-process
+        if pre_transform:
+            s = s.map(pre_transform)
         
         print(f'Processing feature {fname}...')
         if islist:
@@ -155,6 +166,7 @@ def feature_transform(df, feat_configs, is_train=False, n_jobs=1):
         return df
     
     # parallel process features
+    from joblib import Parallel, delayed
     results = Parallel(n_jobs = n_jobs)(
         delayed(_transform_one)(df[f_config['name']], f_config, is_train) for f_config in feat_configs
     )
