@@ -86,3 +86,15 @@ class DNN(nn.Module):
         x = self.logits(x)
 
         return x
+    
+    def train_step(self, features, labels):
+        self.train()
+        logits = self(features)
+        loss = F.binary_cross_entropy_with_logits(logits, labels)
+        return loss
+
+    def eval_step(self, features, labels):
+        self.eval()
+        logits = self(features)
+        loss = F.binary_cross_entropy_with_logits(logits, labels)
+        return loss
