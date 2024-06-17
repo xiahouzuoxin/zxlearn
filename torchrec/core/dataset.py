@@ -1,4 +1,5 @@
 
+import os
 import hashlib
 from copy import deepcopy
 import numpy as np
@@ -289,3 +290,16 @@ class DataFrameDataset(Dataset):
             self.target = self.target.to(device)
 
         return self
+
+class RawDataFrameDataset(DataFrameDataset):
+    def __init__(self, df, feat_configs, target_cols=None, weight_cols_mapping=None, is_train=False, padding_value=-100):
+        df_transform = lambda df: feature_transform(df, feat_configs, is_train, n_jobs=os.cpu_count())
+
+        super(DataFrameDataset, self).__init__(
+            df, 
+            feat_configs=feat_configs,
+            weight_cols_mapping=weight_cols_mapping,
+            target_cols=target_cols,
+            padding_value=padding_value,
+            df_transform=df_transform
+        )
