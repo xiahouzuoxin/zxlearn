@@ -238,7 +238,10 @@ class DataFrameDataset(Dataset):
         features.update({f'{k}': v[idx,:] for k,v in self.seq_sparse_data.items()})
         features.update({f'{k}': v[idx,:] for k,v in self.weight_data.items()})
 
-        return features, self.target[idx,:] if hasattr(self, 'target') else None
+        if hasattr(self, 'target'):
+            return features, self.target[idx,:]
+        else:
+            return features
 
     def convert_to_tensors(self, df):
         if self.dense_cols is not None and len(self.dense_cols) > 0:
