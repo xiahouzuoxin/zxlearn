@@ -47,7 +47,7 @@ class DNN(nn.Module):
         if f_config['type'] == 'sparse':
             if 'emb_dim' not in f_config:
                 raise ValueError('emb_dim must be specified for sparse features.')
-            return nn.Embedding(len(f_config['vocab']), f_config['emb_dim'])
+            return nn.Embedding(f_config['num_embeddings'], f_config['emb_dim'])
         else:
             return None
 
@@ -87,14 +87,14 @@ class DNN(nn.Module):
 
         return x
     
-    def train_step(self, features, labels):
-        self.train()
+    def training_step(self, batch, batch_idx):
+        features, labels = batch
         logits = self(features)
         loss = F.binary_cross_entropy_with_logits(logits, labels)
         return loss
 
-    def eval_step(self, features, labels):
-        self.eval()
+    def validation_step(self, batch, batch_idx):
+        features, labels = batch
         logits = self(features)
         loss = F.binary_cross_entropy_with_logits(logits, labels)
         return loss

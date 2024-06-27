@@ -13,9 +13,14 @@ pd.options.mode.chained_assignment = None  # default='warn'
 pd.options.display.max_rows = 999
 pd.options.display.max_columns = 100
 
-def feature_transform(df, feat_configs, is_train=False, force_hash_category=False, 
+def feature_transform(df, feat_configs, 
+                      is_train=False, 
+                      force_hash_category=False, 
+                      update_numerical_stats=False,
                       outliers_category=['','None','none','nan','NaN','NAN','NaT','unknown','Unknown','Other','other','others','Others','REJ','Reject','REJECT','Rejected'], 
                       outliers_numerical=[], 
+                      category_upper_lower_sensitive=False,
+                      verbose=False,
                       n_jobs=1):
     '''
     Feature transforming for both train and test dataset.
@@ -29,9 +34,11 @@ def feature_transform(df, feat_configs, is_train=False, force_hash_category=Fals
                 {'name': 'c', 'dtype': 'category', 'islist': True, 'emb_dim': 8}, # sequence feature
             ]
         is_train: bool, whether it's training dataset
-        force_hash_category: bool, whether to force hash all category features, which will be useful for large category features and online learning scenario
+        force_hash_category: bool, whether to force hash all category features, which will be useful for large category features and online learning scenario, only effective when is_train=True
+        update_numerical_stats: bool, whether to update mean, std, min, max for numerical features, only effective when is_train=True
         outliers_category: list, outliers for category features
         outliers_numerical: list, outliers for numerical features
+        verbose: bool, whether to print the processing details
         n_jobs: int, number of parallel jobs
     Returns:
         df: pandas DataFrame, transformed dataset
@@ -39,6 +46,7 @@ def feature_transform(df, feat_configs, is_train=False, force_hash_category=Fals
     '''
 
     import numpy as np
+    from sklearn.utils import murmurhash3_32
     import hashlib
 
     if is_train:
@@ -47,10 +55,41 @@ def feature_transform(df, feat_configs, is_train=False, force_hash_category=Fals
     #     print(f'==> Feature transforming (is_train={is_train}) ...')
 
     def hash(v, hash_buckets):
-        hash_object = hashlib.sha256(str(v).encode())
-        hash_digest = hash_object.hexdigest()
-        hash_integer = int(hash_digest, 16)
+        # hash_object = hashlib.sha256(str(v).encode())
+        # hash_digest = hash_object.hexdigest()
+        # hash_integer = int(hash_digest, 16)
+
+        hash_integer = murmurhash3_32(str(v), seed=42, positive=True)
+
         return hash_integer % hash_buckets
+    
+    def update_meanstd(s, his_freq_cnt = 0, mean = None, std = None):
+        '''
+        Update mean, std for numerical feature.
+        If none, calculate from s, else update the value by new input data.
+        '''
+        s_mean = s.mean()
+        s_std = s.std()
+
+        # update mean and std
+        mean = s_mean if mean is None else (mean * his_freq_cnt + s_mean * len(s)) / (his_freq_cnt + len(s))
+        std = s_std if std is None else np.sqrt( (his_freq_cnt * (std ** 2) + len(s) * (s_std ** 2) + his_freq_cnt * (mean - s_mean) ** 2) / (his_freq_cnt + len(s)) )
+        
+        return mean, std
+
+    def update_minmax(s, min_val = None, max_val = None):
+        '''
+        Update min, max for numerical feature. I
+        If none, calculate from s, else update the value by new input data.
+        '''
+        s_min = s.min()
+        s_max = s.max()
+
+        # update min and max
+        min_val = s_min if min_val is None else min(min_val, s_min)
+        max_val = s_max if max_val is None else max(max_val, s_max)
+        
+        return min_val, max_val
     
     def process_category(feat_config, s, is_train):
         name = feat_config['name']
@@ -58,7 +97,9 @@ def feature_transform(df, feat_configs, is_train=False, force_hash_category=Fals
         s = s.replace(
             outliers_category, 
             np.nan).fillna(oov).map( lambda x: str(int(x) if type(x) is float else x) )
-        s = s.astype(str).str.lower()
+        s = s.astype(str)
+        if not category_upper_lower_sensitive:
+            s = s.str.lower()
         
         hash_buckets = feat_config.get('hash_buckets')
         if force_hash_category and hash_buckets is None:
@@ -75,36 +116,50 @@ def feature_transform(df, feat_configs, is_train=False, force_hash_category=Fals
             else:
                 hash_buckets = hash_buckets // 10
 
-            if is_train:
+            if verbose:
                 print(f'Forcing hash category {name} with hash_buckets={hash_buckets}...')
+
+            if is_train:    
                 feat_config['hash_buckets'] = hash_buckets
-            
-        if hash_buckets:
-            s = s.map(lambda x: hash(x, hash_buckets))
-        
+
         if is_train:
             # update feat_config
             feat_config['type'] = 'sparse'
 
-            # generate vocab
+            # low frequency category filtering
             raw_vocab = s.value_counts()
-            min_freq = feat_config.get('min_freq', 3)
+            min_freq = feat_config.get('min_freq', None)
             if min_freq:
                 raw_vocab = raw_vocab[raw_vocab >= min_freq]
 
-            # feat_config['vocab'] = {v: {'idx': k, 'freq_cnt': freq_cnt} for k, (v, freq_cnt) in enumerate(raw_vocab.items())}
-            if 'vocab' not in feat_config:
-                feat_config['vocab'] = {}
-                new_start_idx = 0
-            else:
-                new_start_idx = max([v['idx'] for v in feat_config['vocab'].values()]) + 1
+        if hash_buckets:
+            if verbose:
+                print(f'Hashing category {name} with hash_buckets={hash_buckets}...')
+            if is_train:
+                # update feat_config
+                feat_config['num_embeddings'] = hash_buckets
+                # if 'vocab' not in feat_config:
+                #     feat_config['vocab'] = {}
+                # feat_config['vocab'].update( {v: {'idx': v, 'freq_cnt': 0} for v in range(hash_buckets)} )
 
-            if hash_buckets:
-                feat_config['vocab'].update( {v: {'idx': v, 'freq_cnt': 0} for v in range(hash_buckets)} )
-                for v, freq_cnt in raw_vocab.items():
-                    feat_config['vocab'][v]['freq_cnt'] += freq_cnt
-            else:
-                # update vocab
+                if min_freq:
+                    feat_config['vocab'] = {v: freq_cnt for k, (v, freq_cnt) in enumerate(raw_vocab.items())}
+
+            if 'vocab' in feat_config:
+                s = s.map(lambda x: x if x in feat_config['vocab'] else oov)
+            s = s.map(lambda x: hash(x, hash_buckets)).astype(int)
+        else:
+            if verbose:
+                print(f'Converting category {name} to indices...')
+            if is_train:
+                # feat_config['vocab'] = {v: {'idx': k, 'freq_cnt': freq_cnt} for k, (v, freq_cnt) in enumerate(raw_vocab.items())}
+                if 'vocab' not in feat_config:
+                    feat_config['vocab'] = {}
+                    new_start_idx = 0
+                else:
+                    new_start_idx = max([v['idx'] for v in feat_config['vocab'].values()]) + 1
+
+                # update dynamic vocab (should combine with dynamic embedding module when online training)
                 for k, (v, freq_cnt) in enumerate( raw_vocab.items() ):
                     idx = new_start_idx + k
                     if v not in feat_config['vocab']:
@@ -115,9 +170,14 @@ def feature_transform(df, feat_configs, is_train=False, force_hash_category=Fals
                 if oov not in feat_config['vocab']:
                     feat_config['vocab'][oov] = {'idx': len(raw_vocab), 'freq_cnt': 0}
 
-        # convert to indices
-        oov_index = feat_config['vocab'].get(oov)
-        s = s.map(lambda x: feat_config['vocab'].get(x, oov_index)['idx']).astype(int)
+                if verbose:
+                    print(f'Feature {name} vocab size: {feat_config.get("num_embeddings")} -> {len(feat_config["vocab"])}')
+                
+                feat_config['num_embeddings'] = len(feat_config['vocab'])
+
+            # convert to indices
+            oov_index = feat_config['vocab'].get(oov)
+            s = s.map(lambda x: feat_config['vocab'].get(x, oov_index)['idx']).astype(int)
 
         return s, feat_config
 
@@ -131,15 +191,19 @@ def feature_transform(df, feat_configs, is_train=False, force_hash_category=Fals
         assert not (discretization and normalize), f'hash_buckets/emb_dim and norm cannot be set at the same time: {feat_config}'
 
         if is_train:
+            # update mean, std, min, max
             feat_config['type'] = 'sparse' if discretization else 'dense'
-            if 'mean' not in feat_config:
-                feat_config['mean'] = s.mean()
-            if 'std' not in feat_config:
-                feat_config['std'] = s.std()
-            if 'min' not in feat_config:
-                feat_config['min'] = s.min()
-            if 'max' not in feat_config:
-                feat_config['max'] = s.max()
+
+            if 'mean' not in feat_config or 'std' not in feat_config or update_numerical_stats:
+                feat_config['mean'], feat_config['std'] = update_meanstd(s, feat_config.get('freq_cnt',0), mean=feat_config.get('mean'), std=feat_config.get('std'))
+                feat_config['freq_cnt'] = feat_config.get('freq_cnt',0) + len(s)
+            
+            if 'min' not in feat_config or 'max' not in feat_config or update_numerical_stats:
+                feat_config['min'], feat_config['max'] = update_minmax(s, min_val=feat_config.get('min'), max_val=feat_config.get('max'))
+
+            if verbose:
+                print(f'Feature {feat_config["name"]} mean: {feat_config["mean"]}, std: {feat_config["std"]}, min: {feat_config["min"]}, max: {feat_config["max"]}')
+            
             if discretization:
                 hash_buckets = 10 if hash_buckets is None else hash_buckets
 
@@ -199,7 +263,7 @@ def feature_transform(df, feat_configs, is_train=False, force_hash_category=Fals
         if pre_transform:
             s = s.map(pre_transform)
         
-        if is_train:
+        if verbose:
             print(f'Processing feature {fname}...')
 
         if islist:
