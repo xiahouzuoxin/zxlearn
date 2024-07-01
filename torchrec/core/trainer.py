@@ -1,19 +1,14 @@
 import os
 import numpy as np
+import json
 
 import torch
 import torch.nn as nn
 import torch.optim as optim
-import torch.optim.lr_scheduler as lr_scheduler
 
-# import lightning as pl
-
-import logging
-import numpy as np
-import torch
 import logging
 logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger('DNN')
+logger = logging.getLogger('Trainer')
 logger.setLevel(logging.INFO)
 
 class Trainer:
@@ -23,6 +18,7 @@ class Trainer:
                  max_epochs=1, 
                  early_stopping_rounds=None, 
                  save_ckpt_path=None,
+                 ckpt_prefix='checkpoint',
                  logger=logger,
                  **kwargs):
         """
@@ -42,7 +38,7 @@ class Trainer:
         self.lr_scheduler = lr_scheduler
         self.logger = logger
 
-        self.default_ckpt_prefix = 'checkpoint'   
+        self.default_ckpt_prefix = 'checkpoint' if ckpt_prefix is None else ckpt_prefix
         self.num_epoch = 0 
         self.global_steps = 0    
 
@@ -58,6 +54,8 @@ class Trainer:
             #     # rename the existing directory
             #     os.rename(save_ckpt_path, f'{save_ckpt_path.rstrip('/')}.old')
             os.makedirs(self.save_ckpt_path, exist_ok=True)
+
+            self.metadata_fn = f'{self.save_ckpt_path}/metadata.json'
 
         self.max_epochs = max_epochs
         self.early_stopping_rounds = early_stopping_rounds
@@ -119,7 +117,6 @@ class Trainer:
             self.load_ckpt(init_ckpt_path, exclude_keys=init_ckpt_exclude_keys)
 
         eval_losses = []
-        best_eval_loss = None
 
         eval_loss = self.evaluate_model(self.model, eval_dataloader)
         self.logger.info(f'[Validation] Epoch: {self.num_epoch}/{self.max_epochs}, Validation Loss: {eval_loss}')
@@ -170,12 +167,7 @@ class Trainer:
             eval_loss = self.evaluate_model(self.model, eval_dataloader)
             self.logger.info(f'[Validation] Epoch: {self.num_epoch}/{self.max_epochs}, Validation Loss: {eval_loss}')
 
-            if best_eval_loss is None or eval_loss['loss'] < best_eval_loss:
-                best_eval_loss = eval_loss['loss']
-                ckpt_prefix = f'{self.default_ckpt_prefix}.best'
-            else:
-                ckpt_prefix = self.default_ckpt_prefix
-            self.save_ckpt(ckpt_prefix, local_steps=(self.num_epoch-1)*len(train_dataloader)+k, eval_loss=eval_loss, best_eval_loss=best_eval_loss)
+            self.save_ckpt(self.default_ckpt_prefix, local_steps=(self.num_epoch-1)*len(train_dataloader)+k, eval_loss=eval_loss)
 
             if self.early_stopping_rounds:
                 if len(eval_losses) >= self.early_stopping_rounds:
@@ -184,9 +176,9 @@ class Trainer:
                         self.logger.info(f'Early stopping at epoch {self.num_epoch}...')
                         break
             eval_losses.append(eval_loss)
-            
-        if ret_model == 'best' and eval_dataloader is not None and self.save_ckpt_path:
-            self.load_ckpt(f'{self.default_ckpt_prefix}.best')
+
+        if ret_model == 'best':
+            self.load_ckpt(self.save_ckpt_path, ret_best=True)
 
         return self.model
     
@@ -220,42 +212,68 @@ class Trainer:
 
         torch.save(state_dict, f'{self.save_ckpt_path}/{prefix}.{self.global_steps:06}.ckpt')
 
+        def _update_metadata():
+            # save metadata as json file
+            if os.path.exists(self.metadata_fn):
+                with open(self.metadata_fn, 'r') as f:
+                    metadata = json.load(f)
+            else:
+                metadata = {}
+
+            if eval_loss is not None and eval_loss['loss'] < metadata.get('best_eval_loss', float('inf')):
+                metadata['best_eval_loss'] = eval_loss['loss']
+                metadata['best_eval_global_steps'] = self.global_steps
+                metadata['best_ckpt'] = f'{prefix}.{self.global_steps:06}.ckpt'
+
+            metadata.update({
+                'global_steps': self.global_steps,
+                'last_ckpt': f'{prefix}.{self.global_steps:06}.ckpt',
+                'local_steps': local_steps,
+                'eval_loss': eval_loss
+            })
+            
+            with open(self.metadata_fn, 'w') as f:
+                json.dump(metadata, f, indent=4)
+
+        _update_metadata()
+
         self.logger.info(f'Checkpoint saved at {self.save_ckpt_path}/{prefix}.{self.global_steps:06}.ckpt')
 
-    def load_ckpt(self, prefix_or_path: str, exclude_keys=None):
+    def load_ckpt(self, path: str=None, exclude_keys=None, ret_best=False, raise_error=True):
         '''
-        Load the checkpoint file with the given prefix or path. 
+        Load the checkpoint file with the given path.
         It will overwrite the model, optimizer, lr_scheduler and global_steps.
 
         Args:
-            prefix (str): The prefix of the checkpoint file name 
+            path (str): The path to the checkpoint file or the directory.
             exclude_keys (list, optional): The keys to exclude from the checkpoint file. Defaults to None.
+            ret_best (bool, optional): Whether to return the best checkpoint file. Defaults to False.
+            raise_error (bool, optional): Whether to raise error if the checkpoint file is not found. Defaults to True.
 
         Returns:
             The checkpoint file.
         '''
-        # check if prefix is a file not a directory
-
-        # ckpt_path = prefix_or_path or self.save_ckpt_path
-        if os.path.isfile(prefix_or_path):
-            ckpt_file = prefix_or_path
+        if path is None:
+            return self.load_ckpt(self.save_ckpt_path, exclude_keys=exclude_keys, ret_best=ret_best, raise_error=False)
         else:
-            if os.path.isdir(prefix_or_path):
-                ckpt_path = prefix_or_path
-                prefix = self.default_ckpt_prefix
-            elif self.save_ckpt_path:
-                ckpt_path = self.save_ckpt_path
-                prefix = prefix_or_path
+            if os.path.isfile(path):
+                ckpt_file = path
+            elif os.path.isdir(path) and os.path.exists(self.metadata_fn):
+                # get checkpoint file from metadata
+                with open(self.metadata_fn, 'r') as f:
+                    metadata = json.load(f)
+                    ckpt_file = metadata['best_ckpt'] if ret_best else metadata['last_ckpt']
+                    ckpt_file = os.path.join(path, ckpt_file)
+                    if not os.path.exists(ckpt_file):
+                        if raise_error:
+                            raise FileNotFoundError(f'Checkpoint file {ckpt_file} not found.')
+                        else:
+                            return None
             else:
-                raise ValueError(f'Invalid prefix_or_path: {prefix_or_path}')
-
-            # get the checkpoint file name with the max global steps
-            ckpt_files = [f for f in os.listdir(ckpt_path) if f.startswith(prefix)]
-            if len(ckpt_files) == 0:
-                raise FileNotFoundError(f'No checkpoint files found in "{ckpt_path}" that with prefix "{prefix}".')
-            global_steps = [int(f.split('.')[-2]) for f in ckpt_files]
-            fname = ckpt_files[np.argmax(global_steps)]
-            ckpt_file = f'{ckpt_path}/{fname}'
+                if raise_error:
+                    raise FileNotFoundError(f'Checkpoint file {path} not found.')
+                else:
+                    return None
         
         ckpt = torch.load(ckpt_file)
 

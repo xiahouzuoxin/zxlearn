@@ -18,6 +18,7 @@ class FeatureTransformer:
     def __init__(self, 
                  feat_configs, 
                  category_force_hash=False, 
+                 category_dynamic_vocab=True,
                  category_upper_lower_sensitive=False,
                  numerical_update_stats=False,
                  list_padding_value=-100,
@@ -44,12 +45,16 @@ class FeatureTransformer:
         """
         self.feat_configs = feat_configs
         self.category_force_hash = category_force_hash
+        self.category_dynamic_vocab = category_dynamic_vocab
         self.numerical_update_stats = numerical_update_stats
         self.outliers_category = outliers_category
         self.outliers_numerical = outliers_numerical
         self.category_upper_lower_sensitive = category_upper_lower_sensitive
         self.list_padding_value = list_padding_value
         self.verbose = verbose
+
+        assert all([f['dtype'] in ['category', 'numerical'] for f in self.feat_configs]), 'Only support category and numerical features'
+        assert not (self.category_dynamic_vocab and self.category_force_hash), 'category_dynamic_vocab and category_force_hash cannot be set at the same time'
 
     def transform(self, df, is_train=False, n_jobs=1):
         """
@@ -127,9 +132,13 @@ class FeatureTransformer:
         """
         name = feat_config['name']
         oov = feat_config.get('oov', 'other')  # out of vocabulary
-        s = s.replace(self.outliers_category, np.nan).fillna(oov).map(lambda x: str(int(x) if type(x) is float else x))
+
+        outliers_category = feat_config.get('outliers', self.outliers_category)
+        s = s.replace(outliers_category, np.nan).fillna(oov).map(lambda x: str(int(x) if type(x) is float else x))
         s = s.astype(str)
-        if not self.category_upper_lower_sensitive:
+
+        category_upper_lower_sensitive = feat_config.get('upper_lower_sensitive', self.category_upper_lower_sensitive)
+        if not category_upper_lower_sensitive:
             s = s.str.lower()
 
         hash_buckets = feat_config.get('hash_buckets')
@@ -152,6 +161,9 @@ class FeatureTransformer:
 
             if is_train:
                 feat_config['hash_buckets'] = hash_buckets
+
+        category_dynamic_vocab = feat_config.get('dynamic_vocab', self.category_dynamic_vocab)
+        assert not (category_dynamic_vocab and hash_buckets), 'dynamic_vocab and hash_buckets cannot be set at the same time for feature: {name}'
 
         if is_train:
             # update feat_config
@@ -181,20 +193,22 @@ class FeatureTransformer:
             if is_train:
                 if 'vocab' not in feat_config:
                     feat_config['vocab'] = {}
-                    new_start_idx = 0
+                    idx = 0
+
+                    category_dynamic_vocab = True # force to dynamic vocab when no vocab is provided
                 else:
-                    new_start_idx = max([v['idx'] for v in feat_config['vocab'].values()]) + 1
+                    idx = max([v['idx'] for v in feat_config['vocab'].values()])
 
                 # update dynamic vocab (should combine with dynamic embedding module when online training)
                 for k, (v, freq_cnt) in enumerate(raw_vocab.items()):
-                    idx = new_start_idx + k
-                    if v not in feat_config['vocab']:
+                    if v not in feat_config['vocab'] and category_dynamic_vocab:
+                        idx += 1
                         feat_config['vocab'][v] = {'idx': idx, 'freq_cnt': freq_cnt}
-                    else:
+                    elif v in feat_config['vocab']:
                         feat_config['vocab'][v]['freq_cnt'] += freq_cnt
 
                 if oov not in feat_config['vocab']:
-                    feat_config['vocab'][oov] = {'idx': len(raw_vocab), 'freq_cnt': 0}
+                    feat_config['vocab'][oov] = {'idx': 0, 'freq_cnt': 0}
 
                 if self.verbose:
                     print(f'Feature {name} vocab size: {feat_config.get("num_embeddings")} -> {len(feat_config["vocab"])}')
