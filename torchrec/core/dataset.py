@@ -213,7 +213,7 @@ class FeatureTransformer:
                 if self.verbose:
                     print(f'Feature {name} vocab size: {feat_config.get("num_embeddings")} -> {len(feat_config["vocab"])}')
 
-                feat_config['num_embeddings'] = len(feat_config['vocab'])
+                feat_config['num_embeddings'] = idx + 1
 
             # convert to indices
             oov_index = feat_config['vocab'].get(oov)

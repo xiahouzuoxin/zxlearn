@@ -5,6 +5,8 @@ import torch.optim as optim
 import torch.optim.lr_scheduler as lr_scheduler
 from torch.optim import Adam
 
+from core.embedding import DynamicEmbedding
+
 class DNN(nn.Module):
     def __init__(self, feat_configs, hidden_units=[256, 128, 64]):
         super(DNN, self).__init__()
@@ -47,7 +49,8 @@ class DNN(nn.Module):
         if f_config['type'] == 'sparse':
             if 'emb_dim' not in f_config:
                 raise ValueError('emb_dim must be specified for sparse features.')
-            return nn.Embedding(f_config['num_embeddings'], f_config['emb_dim'])
+            # return nn.Embedding(f_config['num_embeddings'], f_config['emb_dim'])
+            return DynamicEmbedding(f_config['num_embeddings'], f_config['emb_dim'])
         else:
             return None
 

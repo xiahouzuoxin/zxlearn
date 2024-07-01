@@ -18,7 +18,7 @@ class Trainer:
                  max_epochs=1, 
                  early_stopping_rounds=None, 
                  save_ckpt_path=None,
-                 ckpt_prefix='checkpoint',
+                 ckpt_file_prefix='checkpoint',
                  logger=logger,
                  **kwargs):
         """
@@ -38,7 +38,7 @@ class Trainer:
         self.lr_scheduler = lr_scheduler
         self.logger = logger
 
-        self.default_ckpt_prefix = 'checkpoint' if ckpt_prefix is None else ckpt_prefix
+        self.ckpt_file_prefix = 'checkpoint' if ckpt_file_prefix is None else ckpt_file_prefix
         self.num_epoch = 0 
         self.global_steps = 0    
 
@@ -167,7 +167,7 @@ class Trainer:
             eval_loss = self.evaluate_model(self.model, eval_dataloader)
             self.logger.info(f'[Validation] Epoch: {self.num_epoch}/{self.max_epochs}, Validation Loss: {eval_loss}')
 
-            self.save_ckpt(self.default_ckpt_prefix, local_steps=(self.num_epoch-1)*len(train_dataloader)+k, eval_loss=eval_loss)
+            self.save_ckpt(self.ckpt_file_prefix, local_steps=(self.num_epoch-1)*len(train_dataloader)+k, eval_loss=eval_loss)
 
             if self.early_stopping_rounds:
                 if len(eval_losses) >= self.early_stopping_rounds:
