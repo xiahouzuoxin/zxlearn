@@ -19,6 +19,7 @@ class FeatureTransformer:
                  feat_configs, 
                  category_force_hash=False, 
                  category_dynamic_vocab=True,
+                 category_min_freq=None,
                  category_upper_lower_sensitive=False,
                  numerical_update_stats=False,
                  list_padding_value=-100,
@@ -37,6 +38,8 @@ class FeatureTransformer:
                 ]
             is_train: bool, whether it's training dataset
             category_force_hash: bool, whether to force hash all category features, which will be useful for large category features and online learning scenario, only effective when is_train=True
+            category_dynamic_vocab: bool, whether to use dynamic vocab for category features, only effective when is_train=True
+            category_min_freq: int, minimum frequency for category features, only effective when is_train=True
             numerical_update_stats: bool, whether to update mean, std, min, max for numerical features, only effective when is_train=True
             outliers_category: list, outliers for category features
             outliers_numerical: list, outliers for numerical features
@@ -46,6 +49,7 @@ class FeatureTransformer:
         self.feat_configs = feat_configs
         self.category_force_hash = category_force_hash
         self.category_dynamic_vocab = category_dynamic_vocab
+        self.category_min_freq = category_min_freq
         self.numerical_update_stats = numerical_update_stats
         self.outliers_category = outliers_category
         self.outliers_numerical = outliers_numerical
@@ -171,7 +175,7 @@ class FeatureTransformer:
 
             # low frequency category filtering
             raw_vocab = s.value_counts()
-            min_freq = feat_config.get('min_freq', None)
+            min_freq = feat_config.get('min_freq', self.category_min_freq)
             if min_freq:
                 raw_vocab = raw_vocab[raw_vocab >= min_freq]
 
