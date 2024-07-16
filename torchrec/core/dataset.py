@@ -22,7 +22,7 @@ class FeatureTransformer:
                  category_min_freq=None,
                  category_upper_lower_sensitive=False,
                  numerical_update_stats=False,
-                 list_padding_value=-100,
+                 list_padding_value=None,
                  outliers_category=['','None','none','nan','NaN','NAN','NaT','unknown','Unknown','Other','other','others','Others','REJ','Reject','REJECT','Rejected'], 
                  outliers_numerical=[], 
                  verbose=False):
@@ -290,11 +290,12 @@ class FeatureTransformer:
             raise ValueError(f'Unsupported data type: {dtype}')
         s = flat_s.groupby(level=0).agg(list)
         # padding
-        max_len = s.map(len).max()
         padding_maxlen = feat_config.get('maxlen', None)
-        if padding_maxlen:
+        padding_value = feat_config.get('padding_value', self.list_padding_value)
+        if padding_maxlen and padding_value and dtype == 'category':
+            max_len = s.map(len).max()
             max_len = min([padding_maxlen, max_len])
-        s = s.map(lambda x: [self.list_padding_value] * (max_len - len(x)) + x if len(x) < max_len else x[-max_len:])
+            s = s.map(lambda x: [padding_value] * (max_len - len(x)) + x if len(x) < max_len else x[-max_len:])
         return s, updated_f
 
     def _transform_one(self, s, f, is_train=False):
@@ -355,6 +356,8 @@ class DataFrameDataset(Dataset):
         """
         n_jobs = kwargs.get('n_jobs', 1) # os.cpu_count()
         verbose = kwargs.get('verbose', False)
+
+        self.list_padding_value = kwargs.get('list_padding_value', -100)
         
         if is_raw:
             assert 'is_train' in kwargs, 'is_train parameter should be provided when is_raw=True'
@@ -365,7 +368,7 @@ class DataFrameDataset(Dataset):
                 category_force_hash=kwargs.get('category_force_hash', False),
                 category_upper_lower_sensitive=kwargs.get('category_upper_lower_sensitive', False),
                 numerical_update_stats=kwargs.get('numerical_update_stats', False),
-                list_padding_value=kwargs.get('list_padding_value', -100),
+                list_padding_value=self.list_padding_value,
                 outliers_category=kwargs.get('outliers_category', []),
                 outliers_numerical=kwargs.get('outliers_numerical', []),
                 verbose=verbose
@@ -382,6 +385,8 @@ class DataFrameDataset(Dataset):
         self.weight_cols_mapping = {f['name']: f.get('weight_col') for f in feat_configs if f['type'] == 'sparse' if f.get('weight')}    
         self.target_cols = target_cols
 
+        self.seq_sparse_configs = {f['name']: f for f in feat_configs if f['type'] == 'sparse' and f.get('islist')}
+
         if verbose:
             print(f'==> Dense features: {self.dense_cols}')
             print(f'==> Sparse features: {self.sparse_cols}')
@@ -391,7 +396,6 @@ class DataFrameDataset(Dataset):
             print(f'==> Target columns: {self.target_cols}')
 
         self.total_samples = len(df)
-        self.padding_value = kwargs.get('list_padding_value', -100)
 
         self.convert_to_tensors(df)
 
@@ -405,13 +409,17 @@ class DataFrameDataset(Dataset):
         features = {}
         if hasattr(self, 'dense_data'):
             features.update( {'dense_features': self.dense_data[idx, :]} )
-        if hasattr(self, 'seq_dense_features'):
+        if hasattr(self, 'seq_dense_data'):
             features.update( {'seq_dense_features': self.seq_dense_data[idx, :]} )
-            features.update({f'{k}': v[idx,:] for k,v in self.sparse_data.items()})
-            features.update({f'{k}': v[idx,:] for k,v in self.sparse_data.items()})
+        
         features.update({f'{k}': v[idx,:] for k,v in self.sparse_data.items()})
-        features.update({f'{k}': v[idx,:] for k,v in self.seq_sparse_data.items()})
-        features.update({f'{k}': v[idx,:] for k,v in self.weight_data.items()})
+
+        # features.update({f'{k}': v[idx,:] for k,v in self.seq_sparse_data.items()})
+        # features.update({f'{k}': v[idx,:] for k,v in self.weight_data.items()})
+        for k,v in self.seq_sparse_data.items():
+            features[f'{k}'] = v[idx,:] if isinstance(v, torch.Tensor) else v[idx]
+        for k,v in self.weight_data.items():
+            features[f'{k}'] = v[idx,:] if isinstance(v, torch.Tensor) else v[idx]
 
         if hasattr(self, 'target'):
             return features, self.target[idx,:]
@@ -439,21 +447,73 @@ class DataFrameDataset(Dataset):
         
         # for sparse sequences, padding to the maximum length
         self.seq_sparse_data = {}
-        for col in self.seq_sparse_cols:
-            max_len = df[col].apply(len).max()
-            self.seq_sparse_data[col] = df[col].apply( 
-                lambda x: [self.padding_value] * (max_len - len(x)) + x if len(x) < max_len else x[-max_len:])
-            self.seq_sparse_data[col] = torch.tensor(self.seq_sparse_data[col].values.tolist(), dtype=torch.int)
-            if col in self.weight_cols_mapping:
-                weight_col = self.weight_cols_mapping[col]
-                self.weight_data[f'{col}_wgt'] = df[weight_col].apply( 
-                    lambda x: [0.] * (max_len - len(x)) + x if len(x) < max_len else x[-max_len:])
-                self.weight_data[f'{col}_wgt'] = torch.tensor(
-                    self.weight_data[f'{col}_wgt'].values.tolist(), dtype=torch.int)
+        for col, cfg in self.seq_sparse_configs.items():
+            padding_value = cfg.get('padding_value', self.list_padding_value)
+            if padding_value:
+                cfg_maxlen = cfg.get('maxlen', None)
+                max_len = df[col].apply(len).max()
+                max_len = min([cfg_maxlen, max_len]) if cfg_maxlen else max_len
+                self.seq_sparse_data[col] = df[col].apply( 
+                    lambda x: [padding_value] * (max_len - len(x)) + x if len(x) < max_len else x[-max_len:])
+                self.seq_sparse_data[col] = torch.tensor(self.seq_sparse_data[col].values.tolist(), dtype=torch.int)
+                if col in self.weight_cols_mapping:
+                    weight_col = self.weight_cols_mapping[col]
+                    self.weight_data[f'{col}_wgt'] = df[weight_col].apply( 
+                        lambda x: [0.] * (max_len - len(x)) + x if len(x) < max_len else x[-max_len:])
+                    self.weight_data[f'{col}_wgt'] = torch.tensor(
+                        self.weight_data[f'{col}_wgt'].values.tolist(), dtype=torch.int)
+            else:
+                # Return raw sequences without padding
+                # This should be padded in collate_fn when using DataLoader
+                self.seq_sparse_data[col] = list( df[col] )
+                if col in self.weight_cols_mapping:
+                    weight_col = self.weight_cols_mapping[col]
+                    self.weight_data[f'{col}_wgt'] = list( df[weight_col] )
 
         if self.target_cols is not None:
             self.target = torch.tensor(df[self.target_cols].values.tolist(), dtype=torch.float32)
-    
+
+    @staticmethod
+    def collate_fn(batch, list_padding_maxlen=256, list_padding_value=-100):
+        if len(batch) == 0:
+            return batch
+        
+        if len(batch[0]) == 2:
+            features, target = zip(*batch)
+        else:
+            features = batch
+
+        # padding for sequences if not padded
+        feature_keys = [k for k in features[0].keys() if not k.endswith('_wgt')]
+        feature_wgt_keys = set( [k for k in features[0].keys() if k.endswith('_wgt')] )
+
+        for col in feature_keys:
+            if isinstance(features[0][col], torch.Tensor):
+                continue
+
+            max_len = max([len(f[col]) for f in features])
+            min_len = min([len(f[col]) for f in features])
+            if max_len == min_len:
+                # already padded
+                continue
+
+            max_len = min([list_padding_maxlen, max_len]) if list_padding_maxlen else max_len
+            padding_value = list_padding_value
+            if padding_value is None:
+                raise ValueError(f'`padding` should be provided for sequence feature {col}, you can set it in the feature configs or dataset initialization or collate_fn')
+
+            # padding for sequences
+            for k, f in enumerate(features):
+                updated_f = [padding_value] * (max_len - len(f[col])) + f[col] if len(f[col]) < max_len else f[col][-max_len:]
+                features[k].update({col: torch.tensor(updated_f, dtype=torch.int)})
+                if col in feature_wgt_keys:
+                    updated_w = [0.] * (max_len - len(f[f'{col}_wgt'])) + f[f'{col}_wgt'] if len(f[f'{col}_wgt']) < max_len else f[f'{col}_wgt'][-max_len:]
+                    features[k].update({f'{col}_wgt': torch.tensor(updated_w, dtype=torch.float)})
+
+        # call the original collate_fn
+        batch = list(zip(features, target)) if len(batch[0]) == 2 else features
+        return torch.utils.data.dataloader.default_collate(batch)
+
     def to(self, device):
         if hasattr(self, 'dense_data'):
             self.dense_data = self.dense_data.to(device)
