@@ -20,7 +20,7 @@ class FeatureTransformer:
                  category_force_hash=False, 
                  category_dynamic_vocab=True,
                  category_min_freq=None,
-                 category_upper_lower_sensitive=False,
+                 category_upper_lower_sensitive=True,
                  numerical_update_stats=False,
                  list_padding_value=None,
                  outliers_category=['','None','none','nan','NaN','NAN','NaT','unknown','Unknown','Other','other','others','Others','REJ','Reject','REJECT','Rejected'], 
@@ -34,7 +34,7 @@ class FeatureTransformer:
                     {'name': 'a', 'dtype': 'numerical', 'norm': 'std'},   # 'norm' in ['std','[0,1]']
                     {'name': 'a', 'dtype': 'numerical', 'hash_buckets': 10, emb_dim: 8}, # Discretization
                     {'name': 'b', 'dtype': 'category', 'emb_dim': 8, 'hash_buckets': 100}, # category feature with hash_buckets
-                    {'name': 'c', 'dtype': 'category', 'islist': True, 'emb_dim': 8}, # sequence feature
+                    {'name': 'c', 'dtype': 'category', 'islist': True, 'emb_dim': 8, 'maxlen': 256}, # sequence feature, if maxlen is set, it will truncate the sequence to the maximum length
                 ]
             is_train: bool, whether it's training dataset
             category_force_hash: bool, whether to force hash all category features, which will be useful for large category features and online learning scenario, only effective when is_train=True
@@ -278,9 +278,9 @@ class FeatureTransformer:
         Process list features.
         """
         dtype = feat_config['dtype']
-        maxlen = feat_config.get('maxlen', None)
-        if maxlen:
-            s = s.map(lambda x: x[-maxlen:] if isinstance(x, list) else x)
+        max_len = feat_config.get('maxlen', None)
+        if max_len:
+            s = s.map(lambda x: x[:max_len] if isinstance(x, list) else x)
         flat_s = s.explode()
         if dtype == 'category':
             flat_s, updated_f = self.process_category(feat_config, flat_s, is_train)
@@ -290,12 +290,10 @@ class FeatureTransformer:
             raise ValueError(f'Unsupported data type: {dtype}')
         s = flat_s.groupby(level=0).agg(list)
         # padding
-        padding_maxlen = feat_config.get('maxlen', None)
         padding_value = feat_config.get('padding_value', self.list_padding_value)
-        if padding_maxlen and padding_value and dtype == 'category':
-            max_len = s.map(len).max()
-            max_len = min([padding_maxlen, max_len])
-            s = s.map(lambda x: [padding_value] * (max_len - len(x)) + x if len(x) < max_len else x[-max_len:])
+        if padding_value and dtype == 'category':
+            max_len = min([s.map(len).max(), max_len]) if max_len else s.map(len).max()
+            s = s.map(lambda x: x + [padding_value] * (max_len - len(x)) if len(x) < max_len else x[:max_len])
         return s, updated_f
 
     def _transform_one(self, s, f, is_train=False):
@@ -357,7 +355,7 @@ class DataFrameDataset(Dataset):
         n_jobs = kwargs.get('n_jobs', 1) # os.cpu_count()
         verbose = kwargs.get('verbose', False)
 
-        self.list_padding_value = kwargs.get('list_padding_value', -100)
+        self.list_padding_value = kwargs.get('list_padding_value', None)
         
         if is_raw:
             assert 'is_train' in kwargs, 'is_train parameter should be provided when is_raw=True'
@@ -366,7 +364,7 @@ class DataFrameDataset(Dataset):
             self.transformer = FeatureTransformer(
                 feat_configs,
                 category_force_hash=kwargs.get('category_force_hash', False),
-                category_upper_lower_sensitive=kwargs.get('category_upper_lower_sensitive', False),
+                category_upper_lower_sensitive=kwargs.get('category_upper_lower_sensitive', True),
                 numerical_update_stats=kwargs.get('numerical_update_stats', False),
                 list_padding_value=self.list_padding_value,
                 outliers_category=kwargs.get('outliers_category', []),
@@ -449,17 +447,18 @@ class DataFrameDataset(Dataset):
         self.seq_sparse_data = {}
         for col, cfg in self.seq_sparse_configs.items():
             padding_value = cfg.get('padding_value', self.list_padding_value)
+            max_len = cfg.get('maxlen', None)
+            if max_len:
+                df[col] = df[col].apply(lambda x: x[:max_len] if len(x) > max_len else x)
             if padding_value:
-                cfg_maxlen = cfg.get('maxlen', None)
-                max_len = df[col].apply(len).max()
-                max_len = min([cfg_maxlen, max_len]) if cfg_maxlen else max_len
+                max_len = min([df[col].apply(len).max(), max_len]) if max_len else df[col].apply(len).max()
                 self.seq_sparse_data[col] = df[col].apply( 
-                    lambda x: [padding_value] * (max_len - len(x)) + x if len(x) < max_len else x[-max_len:])
+                    lambda x:  x + [padding_value] * (max_len - len(x)) if len(x) < max_len else x[:max_len])
                 self.seq_sparse_data[col] = torch.tensor(self.seq_sparse_data[col].values.tolist(), dtype=torch.int)
                 if col in self.weight_cols_mapping:
                     weight_col = self.weight_cols_mapping[col]
                     self.weight_data[f'{col}_wgt'] = df[weight_col].apply( 
-                        lambda x: [0.] * (max_len - len(x)) + x if len(x) < max_len else x[-max_len:])
+                        lambda x: x + [0.] * (max_len - len(x)) if len(x) < max_len else x[:max_len])
                     self.weight_data[f'{col}_wgt'] = torch.tensor(
                         self.weight_data[f'{col}_wgt'].values.tolist(), dtype=torch.int)
             else:
@@ -475,6 +474,16 @@ class DataFrameDataset(Dataset):
 
     @staticmethod
     def collate_fn(batch, list_padding_maxlen=256, list_padding_value=-100):
+        """
+        Collate function for DataFrameDataset.
+        It mainly for padding sequences if not padded. If there aren't any sequences, it will call the default collate_fn.
+        Args:
+            batch: list of tuples, each tuple contains features and target
+            list_padding_maxlen: int, maximum length for padding list features
+            list_padding_value: int, padding value for list features
+        Returns:
+            batch: list of tensors, each tensor contains features and target
+        """
         if len(batch) == 0:
             return batch
         
@@ -504,10 +513,10 @@ class DataFrameDataset(Dataset):
 
             # padding for sequences
             for k, f in enumerate(features):
-                updated_f = [padding_value] * (max_len - len(f[col])) + f[col] if len(f[col]) < max_len else f[col][-max_len:]
+                updated_f = f[col] + [padding_value] * (max_len - len(f[col])) if len(f[col]) < max_len else f[col][:max_len]
                 features[k].update({col: torch.tensor(updated_f, dtype=torch.int)})
                 if col in feature_wgt_keys:
-                    updated_w = [0.] * (max_len - len(f[f'{col}_wgt'])) + f[f'{col}_wgt'] if len(f[f'{col}_wgt']) < max_len else f[f'{col}_wgt'][-max_len:]
+                    updated_w = f[f'{col}_wgt'] + [0.] * (max_len - len(f[f'{col}_wgt'])) if len(f[f'{col}_wgt']) < max_len else f[f'{col}_wgt'][:max_len]
                     features[k].update({f'{col}_wgt': torch.tensor(updated_w, dtype=torch.float)})
 
         # call the original collate_fn
@@ -570,7 +579,7 @@ class IterableDataFrameDataset(IterableDataset):
             self.transformer = FeatureTransformer(
                 feat_configs,
                 category_force_hash=kwargs.get('category_force_hash', False),
-                category_upper_lower_sensitive=kwargs.get('category_upper_lower_sensitive', False),
+                category_upper_lower_sensitive=kwargs.get('category_upper_lower_sensitive', True),
                 numerical_update_stats=kwargs.get('numerical_update_stats', False),
                 list_padding_value=kwargs.get('list_padding_value', -100),
                 outliers_category=kwargs.get('outliers_category', []),

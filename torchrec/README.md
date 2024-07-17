@@ -9,18 +9,15 @@ Supported features include:
 * Both numerical and categorical input features
   * Categorical: automatic vocabulary extraction, low-frequency filtering, dynamic embedding, hash embedding
   * Numerical: standard or 0-1 normalization, automatic discretization, automatic update of statistical number for standard or 0-1 normalization if new data is fed in
-* Variable-length sequence feature support
-* Sequence features with weights by setting the weight column, for example, 'k1:v1,k2:v2,k3:v3'
+* Variable-length sequence feature support, if there's order in the sequence, please put the latest data before the oldest data as it may pads at the end of the sequence
+* Sequence features support weights by setting the weight column
 * Implemented [DataFrameDataset, IterableDataFrameDataset](./core/dataset.py) for straightforward training with pandas DataFrame in PyTorch
 * Implemented a common [Trainer](./core/trainer.py) for training pytorch models, and save/load the results
+* Basic FastAPI for model serving
 
 Not supported:
 
 - Distribution training, as target of this tool is for small companies
-
-Todo:
-
-- Generate a simple model service API
 
 # Example
 
@@ -34,6 +31,19 @@ Implement the model by inherit from nn.Module but with some extra member methods
 - optional:
   - configure_optimizers
   - configure_lr_scheduler
+
+# API Serving
+
+[core/serve.py](./core/serve.py)
+
+- Launch the service by given service name and model path
+
+```
+cd $torchrec_root
+python -m core.serve --name [name] --path [path/to/model or path/to/ckpt]
+```
+
+- Test the service: reference `test_predict` in `core/serve.py`
 
 # Related Dataset
 
