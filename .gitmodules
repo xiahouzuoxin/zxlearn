@@ -1,0 +1,3 @@
+[submodule "torchrec"]
+	path = torchrec
+	url = https://github.com/xiahouzuoxin/torchrec
