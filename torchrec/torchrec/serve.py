@@ -88,7 +88,7 @@ async def health():
 def test_predict(df, name):
     ''' 
     Test the prediction of the model.
-    First launch the server by `python -m core.serve --name {name} --path path/to/model`
+    First launch the server by `python -m torchrec.serve --name {name} --path path/to/model`
     '''
     import requests
     import json

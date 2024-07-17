@@ -11,17 +11,23 @@ Supported features include:
   * Numerical: standard or 0-1 normalization, automatic discretization, automatic update of statistical number for standard or 0-1 normalization if new data is fed in
 * Variable-length sequence feature support, if there's order in the sequence, please put the latest data before the oldest data as it may pads at the end of the sequence
 * Sequence features support weights by setting the weight column
-* Implemented [DataFrameDataset, IterableDataFrameDataset](./core/dataset.py) for straightforward training with pandas DataFrame in PyTorch
-* Implemented a common [Trainer](./core/trainer.py) for training pytorch models, and save/load the results
+* Implemented [DataFrameDataset, IterableDataFrameDataset](./torchrec/dataset.py) for straightforward training with pandas DataFrame in PyTorch
+* Implemented a common [Trainer](./torchrec/trainer.py) for training pytorch models, and save/load the results
 * Basic FastAPI for model serving
 
 Not supported:
 
 - Distribution training, as target of this tool is for small companies
 
+# Install
+
+```
+pip install git+https://github.com/xiahouzuoxin/torchrec
+```
+
 # Example
 
-[./train_amazon.ipynb](./train_amazon.ipynb)
+[./examples/train_amazon.ipynb](./examples/train_amazon.ipynb)
 
 Implement the model by inherit from nn.Module but with some extra member methods,
 
@@ -34,19 +40,18 @@ Implement the model by inherit from nn.Module but with some extra member methods
 
 # API Serving
 
-[core/serve.py](./core/serve.py)
+[torchrec/serve.py](./torchrec/serve.py)
 
 - Launch the service by given service name and model path
 
 ```
 cd $torchrec_root
-python -m core.serve --name [name] --path [path/to/model or path/to/ckpt]
+python -m torchrec.serve --name [name] --path [path/to/model or path/to/ckpt]
 ```
 
 - Test the service: reference `test_predict` in `core/serve.py`
 
 # Related Dataset
 
-- random generated
 - https://cseweb.ucsd.edu/~jmcauley/datasets/amazon/links.html
 - https://tianchi.aliyun.com/dataset/56?spm=a2c22.12282016.0.0.27934197fn5Vdv
