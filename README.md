@@ -1,6 +1,6 @@
 __Learn by implementing them with code.__
 
-### [torchrec](./torchrec/)
+### [torchrec](https://github.com/xiahouzuoxin/torchrec)
 
 A simple recommendation framework with PyTorch for small companies.
 
